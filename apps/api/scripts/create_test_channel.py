@@ -37,37 +37,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-DEFAULT_SPEC: dict[str, Any] = {
-    "name": "Test Channel",
-    "handle": "test-channel",
-    "description": "Scratch channel for testing the pipeline end to end.",
-    "niche": "kids-stories",
-    "audience": "Children 3-7",
-    "language": "en",
-    "video_format": "16:9",
-    "visual_mode": "image",
-    "settings": {
-        "visual_style": "Soft gouache storybook illustration, warm light",
-        "content_guidelines": "Gentle tone, simple vocabulary, kind resolution.",
-        "banned_topics": ["violence", "weapons"],
-        "target_duration_seconds": 240,
-        "approval_mode": "always",
-    },
-    "characters": [
-        {
-            "name": "Pip",
-            "role": "protagonist",
-            "description": "A curious small fox with a red scarf",
-            "visual_prompt": "small orange fox cub, cream chest, oversized red knitted scarf",
-        },
-        {
-            "name": "Nora",
-            "role": "narrator",
-            "description": "Warm storyteller voice",
-            "visual_prompt": "storybook narrator position, never depicted on screen",
-        },
-    ],
-}
+EXAMPLE_SPEC = Path(__file__).with_name("channel-spec.example.json")
 
 
 class ApiError(RuntimeError):
@@ -125,6 +95,13 @@ class Client:
         _, channel = self._request("/channels", "POST", payload)
         return channel
 
+    def update(self, channel_id: str, spec: dict) -> dict:
+        payload = {k: v for k, v in spec.items() if k in
+                   ("name", "handle", "description", "niche", "audience", "language",
+                    "video_format", "visual_mode", "accent_color", "settings")}
+        _, channel = self._request(f"/channels/{channel_id}", "PATCH", payload)
+        return channel
+
     def set_characters(self, channel_id: str, characters: list[dict]) -> list[dict]:
         _, data = self._request(f"/channels/{channel_id}/characters", "PUT", characters)
         return data or []
@@ -138,9 +115,12 @@ class Client:
 
 
 def load_spec(path: str | None) -> dict:
-    if not path:
-        return DEFAULT_SPEC
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    """Read the channel spec.
+
+    The example file is the default, so the documented sample and the tool's default can never
+    drift apart (they did: the default dict still described the old demo channel).
+    """
+    return json.loads(Path(path or EXAMPLE_SPEC).read_text(encoding="utf-8"))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -157,6 +137,11 @@ def main(argv: list[str] | None = None) -> int:
         "--password", default=os.getenv("FACTORY_PASSWORD", settings.bootstrap_admin_password)
     )
     parser.add_argument("--dry-run", action="store_true", help="print the payload without calling the API")
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="apply the spec to the existing channel with this handle instead of creating one",
+    )
     parser.add_argument("--delete", metavar="HANDLE", help="delete the channel with this handle and exit")
     parser.add_argument(
         "--produce", action="store_true", help="after creating, start one production run on the channel"
@@ -183,21 +168,29 @@ def main(argv: list[str] | None = None) -> int:
             spec["handle"] = args.handle
 
         if any(c["handle"] == spec["handle"] for c in client.channels()):
-            print(f"channel '{spec['handle']}' already exists — choose another handle or --delete it first")
-            return 1
-
-        channel = client.create(spec, dry_run=args.dry_run)
-        if args.dry_run:
-            print(json.dumps(channel, indent=2))
-            return 0
-        print(f"created channel {channel['name']} ({channel['handle']}) id={channel['id']}")
+            if not args.update:
+                print(f"channel '{spec['handle']}' already exists — use --update to fill it, "
+                      f"or --delete it first")
+                return 1
+            existing = next(c for c in client.channels() if c["handle"] == spec["handle"])
+            if args.dry_run:
+                print(json.dumps({"patch": spec, "target": existing["id"]}, indent=2, ensure_ascii=False))
+                return 0
+            channel = client.update(existing["id"], spec)
+            print(f"updated channel {channel['name']} ({channel['handle']}) id={channel['id']}")
+        else:
+            channel = client.create(spec, dry_run=args.dry_run)
+            if args.dry_run:
+                print(json.dumps(channel, indent=2, ensure_ascii=False))
+                return 0
+            print(f"created channel {channel['name']} ({channel['handle']}) id={channel['id']}")
 
         characters = spec.get("characters") or []
         if characters:
             saved = client.set_characters(channel["id"], characters)
             print(f"characters: {', '.join(c['name'] for c in saved)}")
         else:
-            print("characters: none")
+            print("characters: none (kept as they are)" if args.update else "characters: none")
 
         if args.produce:
             workflow = client.start_production(channel["id"])

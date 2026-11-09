@@ -1,30 +1,46 @@
 {
-  "name": "Test Channel",
-  "handle": "test-channel",
-  "description": "Scratch channel for testing the pipeline end to end.",
+  "name": "Little Lantern Stories",
+  "handle": "littlelantern",
+  "description": "Cerita anak bahasa Indonesia yang hangat untuk usia 3–7 tahun. Setiap episode adalah dongeng pendek dengan tokoh yang lucu dan penutup yang menenangkan, sambil mengajarkan nilai kecil seperti berbagi, jujur, sabar, dan berani mencoba. Cocok ditonton bersama orang tua sebelum tidur.",
   "niche": "kids-stories",
-  "audience": "Children 3-7",
-  "language": "en",
-  "video_format": "16:9",
+  "audience": "Anak usia 3–7 tahun bersama orang tua",
+  "language": "id",
+  "video_format": "9:16",
   "visual_mode": "image",
+  "accent_color": "#D6FF45",
   "settings": {
-    "visual_style": "Soft gouache storybook illustration, warm light",
-    "content_guidelines": "Gentle tone, simple vocabulary, kind resolution.",
-    "banned_topics": ["violence", "weapons"],
+    "visual_style": "Soft gouache storybook illustration, whimsical children's picture book aesthetic, warm pastel palette, gentle light, paper texture, rounded friendly shapes",
+    "content_guidelines": "Gunakan bahasa Indonesia sederhana yang mudah dipahami anak 3–7 tahun. Kalimat pendek (maksimal 12 kata). Nada hangat dan menenangkan. Konflik hanya ringan, tanpa ketegangan berkepanjangan, dan selalu berakhir dengan penyelesaian yang baik. Tinggalkan ruang untuk jeda bercerita. Hindari tokoh yang menakutkan.",
+    "banned_topics": [
+      "kekerasan",
+      "senjata",
+      "menakut-nakuti",
+      "kematian",
+      "perundungan berat"
+    ],
+    "made_for_kids": true,
     "target_duration_seconds": 240,
-    "approval_mode": "always"
+    "approval_mode": "always",
+    "min_quality_score": 85,
+    "thumbnail_style": "Gambar tokoh utama tersenyum di tengah, teks judul besar dan mudah dibaca, latar cerah dengan warna hangat"
   },
   "characters": [
     {
-      "name": "Pip",
+      "name": "Lila",
       "role": "protagonist",
-      "description": "A curious small fox with a red scarf",
-      "visual_prompt": "small orange fox cub, cream chest, oversized red knitted scarf"
+      "description": "Anak perempuan 6 tahun yang penasaran dan suka membantu",
+      "visual_prompt": "6-year-old Indonesian girl, round face, short black hair with a yellow ribbon, purple jumper, small brown satchel"
     },
     {
-      "name": "Nora",
+      "name": "Bima",
+      "role": "companion",
+      "description": "Sahabat Lila, anak laki-laki yang ceria dan suka bercanda",
+      "visual_prompt": "7-year-old Indonesian boy, warm brown skin, curly hair, green t-shirt, blue shorts, always carrying a small wooden toy boat"
+    },
+    {
+      "name": "Kak Mia",
       "role": "narrator",
-      "description": "Warm storyteller voice",
+      "description": "Pendongeng yang hangat, tidak pernah muncul di layar",
       "visual_prompt": "storybook narrator position, never depicted on screen"
     }
   ]
