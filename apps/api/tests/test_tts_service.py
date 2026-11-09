@@ -312,8 +312,9 @@ def test_failed_generation_is_recorded(client, auth):
 
 
 def test_provider_catalogue_has_no_secrets(client, auth):
+    # Read before any test adds a mock: a fresh workspace lists real adapters only.
     body = client.get("/api/v1/tts/providers").json()
-    assert {"cartesia", "elevenlabs", "mock"} <= {row["slug"] for row in body}
+    assert {"cartesia", "elevenlabs"} <= {row["slug"] for row in body}
     import re
 
     text = client.get("/api/v1/tts/providers").text

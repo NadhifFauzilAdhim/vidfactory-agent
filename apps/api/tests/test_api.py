@@ -28,6 +28,9 @@ def test_seeded_agents_and_providers(client, auth):
     providers = client.get("/api/v1/providers").json()
     kinds = {p["kind"] for p in providers}
     assert {"llm", "tts", "image", "youtube"} <= kinds
+    # A fresh install is clean: the catalogue lists real adapters only, so nothing can produce
+    # placeholder content before an operator adds a key.
+    assert not [p for p in providers if p["is_mock"]], providers
     assert all("credential_ciphertext" not in p and "api_key" not in p for p in providers)
 
 
@@ -102,6 +105,32 @@ def test_schedule_crud(client, auth):
     assert client.delete(f"/api/v1/schedules/{schedule['id']}").status_code == 204
 
 
+def _add_mock_providers(client) -> None:
+    """Bind mock adapters explicitly, the way an operator would for a dry run.
+
+    Bootstrap seeds real adapters only, and a mock is never an implicit fallback, so a workflow
+    test has to add one *and* bind it to the agent — which is exactly the behaviour being asserted.
+    """
+    providers = {p["kind"]: p for p in client.get("/api/v1/providers").json() if p["kind"] in
+                 ("llm", "tts", "image")}
+    for kind in ("llm", "tts", "image"):
+        created = client.post(
+            "/api/v1/providers",
+            json={"kind": kind, "slug": "mock", "name": f"Mock {kind}", "vendor": "Factory"},
+        )
+        assert created.status_code == 201, created.text
+        providers[kind] = created.json()
+    # Every agent that talks to an external provider is bound to the mock for that kind.
+    for agent in client.get("/api/v1/agents").json():
+        provider = providers.get(agent["port"])
+        if provider is None:
+            continue
+        bound = client.put(
+            f"/api/v1/agents/{agent['key']}/config", json={"provider_id": provider["id"]}
+        )
+        assert bound.status_code == 200, bound.text
+
+
 def _wait_for_workflow(api, workflow_id: str, timeout: float) -> dict:
     """Poll a workflow by *file* state only — the workflow runs on a different loop (a live server),
     so a blocking sleep here is safe and never freezes it."""
@@ -120,6 +149,7 @@ def _wait_for_workflow(api, workflow_id: str, timeout: float) -> dict:
 
 def test_workflow_run_and_approval_gate(live_server, client, auth, remotion_ready):
     channel_id = auth["channel"]["id"]
+    _add_mock_providers(client)
     start = client.post(f"/api/v1/workflows?channel_id={channel_id}&force_approval=true")
     assert start.status_code == 201, start.text
     workflow_id = start.json()["id"]

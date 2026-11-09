@@ -178,7 +178,9 @@ class ProviderFactory:
             )
             candidates = list(result.scalars())
             real = [c for c in candidates if not c.is_mock and c.credential_ciphertext]
-            mocks = [c for c in candidates if c.is_mock]
+            # Mock adapters are only used when an operator adds one explicitly and binds it to the
+            # agent — never as an automatic fallback, which would quietly produce placeholder work.
+            mocks = [c for c in candidates if c.is_mock and _bound_to(config, c)]
             provider = real[0] if real else (mocks[0] if mocks else None)
 
         # The configured model only applies to the provider it was configured for. When selection
@@ -286,6 +288,11 @@ def _first_model(provider: AiProvider) -> str:
     if models:
         return str(models[0])
     return DEFAULT_MODELS.get(provider.slug, {}).get(provider.kind, "")
+
+
+def _bound_to(config: AgentConfiguration | None, provider: AiProvider) -> bool:
+    """True when the agent's configuration explicitly names this provider."""
+    return bool(config and config.provider_id and str(config.provider_id) == str(provider.id))
 
 
 async def _default_voice(session: AsyncSession, channel: Channel | None) -> str:

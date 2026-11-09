@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from datetime import UTC, datetime, time
 
 from sqlalchemy import func, select
 
@@ -24,26 +23,16 @@ from app.db.session import engine, init_models, session_scope
 from app.models import (
     Agent,
     AiProvider,
-    Channel,
-    ChannelCharacter,
-    ChannelSetting,
-    Schedule,
     User,
     Workspace,
     WorkspaceMember,
 )
-from app.workflow.scheduler import next_run
 
+#: Provider catalogue seeded on a brand-new installation. Real adapters only: a fresh workspace
+#: starts with unconfigured entries that ask for a key, never with mock adapters that would
+#: silently produce placeholder content. Mock adapters stay available in code for tests and for an
+#: operator who explicitly adds one from the providers screen.
 DEFAULT_PROVIDERS = [
-    {
-        "kind": "llm",
-        "slug": "mock",
-        "name": "Mock LLM",
-        "vendor": "Factory",
-        "is_mock": True,
-        "models": [{"id": "mock-structured", "name": "Deterministic fixtures", "input_cost_per_million": 0,
-                    "output_cost_per_million": 0}],
-    },
     {
         "kind": "llm",
         "slug": "openai",
@@ -69,14 +58,6 @@ DEFAULT_PROVIDERS = [
             {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "input_cost_per_million": 1.25,
              "output_cost_per_million": 10.00},
         ],
-    },
-    {
-        "kind": "tts",
-        "slug": "mock",
-        "name": "Mock TTS",
-        "vendor": "Factory",
-        "is_mock": True,
-        "models": [{"id": "mock-tts", "name": "Duration-only audio"}],
     },
     {
         "kind": "tts",
@@ -122,14 +103,6 @@ DEFAULT_PROVIDERS = [
     },
     {
         "kind": "image",
-        "slug": "mock",
-        "name": "Mock Images",
-        "vendor": "Factory",
-        "is_mock": True,
-        "models": [{"id": "mock-image", "name": "Pillow storyboard cards"}],
-    },
-    {
-        "kind": "image",
         "slug": "openai",
         "name": "OpenAI Images",
         "vendor": "OpenAI",
@@ -144,14 +117,6 @@ DEFAULT_PROVIDERS = [
         "is_mock": False,
         "models": [{"id": "gemini-2.5-flash-image", "name": "Gemini Flash Image", "unit_cost": 0.039,
                     "unit": "image"}],
-    },
-    {
-        "kind": "youtube",
-        "slug": "mock",
-        "name": "Mock YouTube",
-        "vendor": "Factory",
-        "is_mock": True,
-        "models": [{"id": "v3", "name": "No remote upload"}],
     },
     {
         "kind": "youtube",
@@ -287,57 +252,11 @@ async def bootstrap(if_empty: bool = False) -> None:
         if member is None:
             session.add(WorkspaceMember(user_id=admin.id, workspace_id=workspace.id, role="owner"))
 
-        channel = await session.scalar(select(Channel).where(Channel.workspace_id == workspace.id))
-        if channel is None:
-            channel = Channel(
-                workspace_id=workspace.id,
-                name="Little Lantern Stories",
-                handle="littlelantern",
-                description="Original bedtime stories and gentle learning tales for children aged 3–7.",
-                niche="kids-stories",
-                audience="Children 3-7 · parents co-viewing",
-                language="en",
-                video_format="16:9",
-            )
-            session.add(channel)
-            await session.flush()
-            session.add(
-                ChannelSetting(
-                    channel_id=channel.id,
-                    visual_style="Soft gouache storybook illustration, warm light, paper texture",
-                    content_guidelines=(
-                        "Gentle, reassuring tone. No peril beyond mild suspense. Always a kind resolution. "
-                        "Simple vocabulary, 3-7 year olds."
-                    ),
-                    banned_topics=["violence", "weapons", "jump scares"],
-                    # No demo voice id here: a new channel inherits the workspace's TTS default.
-                    # Seeding "mock-narrator" sent an invalid voice to real providers.
-                )
-            )
-            for name, role, desc, prompt in [
-                ("Pip", "protagonist", "A curious small fox with a red scarf",
-                 "small orange fox cub, cream chest, oversized red knitted scarf, round friendly eyes"),
-                ("Mossy", "companion", "An old wise tortoise with a lantern shell",
-                 "ancient green tortoise with moss growth on a lantern-shaped shell"),
-                ("Nora", "narrator", "Warm storyteller voice",
-                 "storybook narrator position, never depicted on screen"),
-            ]:
-                session.add(
-                    ChannelCharacter(
-                        channel_id=channel.id, name=name, role=role, description=desc, visual_prompt=prompt
-                    )
-                )
-            schedule = Schedule(
-                channel_id=channel.id,
-                name="Daily story",
-                timezone="Europe/Amsterdam",
-                start_time=time(5, 30),
-                publish_time=time(16, 0),
-            )
-            schedule.next_run_at = next_run(schedule, datetime.now(UTC))
-            session.add(schedule)
+        # No demo channel, characters or schedule. A fresh workspace starts empty so the first
+        # thing an operator sees is onboarding, not someone else's story: sample content made it
+        # look like real work was already set up.
         workspace_id = workspace.id
-        print(f"bootstrap: admin={admin.email} workspace={workspace.slug} channel={channel.name}")
+        print(f"bootstrap: admin={admin.email} workspace={workspace.slug} (no channel yet)")
     await sync_agents()
     await sync_providers(workspace_id)
     await refresh_tts_providers(workspace_id)

@@ -181,6 +181,12 @@ class TTSConfigurationService:
         )
 
     async def first_provider(self, workspace_id: uuid.UUID) -> AiProvider | None:
+        """The provider a missing voice config inherits from: only one holding a real key.
+
+        A mock row is never inherited implicitly. Seeding used to create a mock TTS provider, so
+        falling back to it was harmless; now that a fresh workspace has none, a silent fallback
+        would mean placeholder audio pretending to be narration.
+        """
         rows = list((await self.session.execute(
             select(AiProvider).where(
                 AiProvider.workspace_id == workspace_id,
@@ -189,8 +195,7 @@ class TTSConfigurationService:
             ).order_by(AiProvider.is_mock.asc(), AiProvider.priority.asc())
         )).scalars())
         real = [r for r in rows if not r.is_mock and r.credential_ciphertext]
-        mocks = [r for r in rows if r.is_mock]
-        return real[0] if real else (mocks[0] if mocks else None)
+        return real[0] if real else None
 
     async def resolve(
         self,

@@ -67,8 +67,14 @@ def auth(client):
     )
     assert resp.status_code == 200, resp.text
     session = resp.json()
-    channel = client.get("/api/v1/channels").json()[0]
-    return {"headers": {}, "session": session, "channel": channel}
+    # A fresh workspace has no channel: bootstrap seeds none, so tests create one the way an
+    # operator would rather than relying on demo content.
+    created = client.post(
+        "/api/v1/channels",
+        json={"name": "Test Channel", "handle": "fixture", "niche": "kids-stories"},
+    )
+    assert created.status_code == 201, created.text
+    return {"headers": {}, "session": session, "channel": created.json()}
 
 
 @pytest.fixture(scope="session", autouse=True)
