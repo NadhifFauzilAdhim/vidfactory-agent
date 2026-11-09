@@ -1,0 +1,31 @@
+{
+  "name": "Test Channel",
+  "handle": "test-channel",
+  "description": "Scratch channel for testing the pipeline end to end.",
+  "niche": "kids-stories",
+  "audience": "Children 3-7",
+  "language": "en",
+  "video_format": "16:9",
+  "visual_mode": "image",
+  "settings": {
+    "visual_style": "Soft gouache storybook illustration, warm light",
+    "content_guidelines": "Gentle tone, simple vocabulary, kind resolution.",
+    "banned_topics": ["violence", "weapons"],
+    "target_duration_seconds": 240,
+    "approval_mode": "always"
+  },
+  "characters": [
+    {
+      "name": "Pip",
+      "role": "protagonist",
+      "description": "A curious small fox with a red scarf",
+      "visual_prompt": "small orange fox cub, cream chest, oversized red knitted scarf"
+    },
+    {
+      "name": "Nora",
+      "role": "narrator",
+      "description": "Warm storyteller voice",
+      "visual_prompt": "storybook narrator position, never depicted on screen"
+    }
+  ]
+}
