@@ -19,27 +19,33 @@ const Scene: React.FC<SceneRendererProps> = ({spec, scene, frames}) => {
   return (
     <SceneFrame spec={spec} scene={scene} frames={frames} captionStyle="lower-third">
       <Backdrop spec={spec} scene={scene} frame={frame} frames={frames} />
-      <AbsoluteFill style={{border: "2px solid #111111", margin: "1.4%"}} />
-      <div
-        style={{
-          position: "absolute",
-          left: "3.6%",
-          top: "3.8%",
-          display: "flex",
-          gap: 12,
-          alignItems: "baseline",
-          fontFamily: MONO,
-          fontSize: "1.05cqw",
-          letterSpacing: "0.18em",
-          textTransform: "uppercase",
-          color: "#111111",
-          opacity: index,
-          transform: entrance("slide", index).transform,
-        }}
-      >
-        {String(scene.index).padStart(2, "0")} / {String(spec.scenes.length).padStart(2, "0")}
-        {scene.title ? <span style={{marginLeft: 12, opacity: 0.55}}>{scene.title}</span> : null}
-      </div>
+      {/* A code scene is its own design: the paper border and mono index would sit on top of the
+          author's composition. The template keeps only this template's framing, not its typography. */}
+      {scene.mode !== "code" && (
+        <>
+          <AbsoluteFill style={{border: "2px solid #111111", margin: "1.4%"}} />
+          <div
+            style={{
+              position: "absolute",
+              left: "3.6%",
+              top: "3.8%",
+              display: "flex",
+              gap: 12,
+              alignItems: "baseline",
+              fontFamily: MONO,
+              fontSize: "1.05cqw",
+              letterSpacing: "0.18em",
+              textTransform: "uppercase",
+              color: "#111111",
+              opacity: index,
+              transform: entrance("slide", index).transform,
+            }}
+          >
+            {String(scene.index).padStart(2, "0")} / {String(spec.scenes.length).padStart(2, "0")}
+            {scene.title ? <span style={{marginLeft: 12, opacity: 0.55}}>{scene.title}</span> : null}
+          </div>
+        </>
+      )}
     </SceneFrame>
   );
 };

@@ -6,11 +6,12 @@
 FROM node:22-bookworm-slim AS media
 
 # Chromium runtime dependencies for Remotion's headless shell plus fonts, so serif/sans captions do
-# not render as empty boxes.
+# not render as empty boxes. `fonts-liberation` supplies the Liberation Serif/Sans faces that stand
+# in for Georgia / Arial in LLM-authored code scenes, so authored type stays readable.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl \
-        fonts-dejavu-core fonts-liberation fonts-noto-color-emoji \
+        fonts-dejavu-core fonts-liberation fonts-liberation2 fonts-noto-color-emoji \
         libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
         libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 \
         libcairo2 libatspi2.0-0 libx11-6 libx11-xcb1 libxcb1 libxext6 libglib2.0-0 \
@@ -18,7 +19,9 @@ RUN apt-get update \
 
 WORKDIR /opt/remotion
 COPY services/media-engine/remotion/package.json services/media-engine/remotion/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+# `--include=dev` is explicit: some build hosts export NODE_ENV=production, which would silently
+# skip the type-checking toolchain. The runtime engine needs every listed dependency, GSAP included.
+RUN npm ci --no-audit --no-fund --include=dev
 
 # Remotion downloads a headless Chromium on first use. Doing it at build time keeps the first
 # render from timing out on a cold container, and the cache lives with the engine.
@@ -27,6 +30,14 @@ RUN npx remotion browser ensure
 COPY services/media-engine/remotion/tsconfig.json ./
 COPY services/media-engine/remotion/src ./src
 COPY services/media-engine/remotion/render.mjs ./render.mjs
+# Vendor staging (GSAP for code scenes) and the engine self-checks used by container_check.py.
+COPY services/media-engine/remotion/assets.mjs ./assets.mjs
+COPY services/media-engine/remotion/scripts ./scripts
+
+# Fail the build, not the first render, if the engine is broken: vendor assets (GSAP) must exist,
+# staging must work, and the compositions (including code scenes) must bundle. A full frame render
+# is exercised by infrastructure/docker/container_check.py, which is faster to run than to bake.
+RUN node scripts/verify-engine.mjs
 
 
 # --- API ---------------------------------------------------------------------
@@ -43,7 +54,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ffmpeg curl ca-certificates \
-        fonts-dejavu-core fonts-liberation fonts-noto-color-emoji \
+        fonts-dejavu-core fonts-liberation fonts-liberation2 fonts-noto-color-emoji \
         libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
         libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 \
         libcairo2 libatspi2.0-0 libx11-6 libx11-xcb1 libxcb1 libxext6 libglib2.0-0 \
@@ -61,6 +72,10 @@ RUN pip install ".[temporal]" \
     && mkdir -p /app/storage && chown -R factory:factory /app/storage
 COPY apps/api/alembic ./alembic
 COPY apps/api/alembic.ini ./alembic.ini
+# Operator scripts that are meant to run inside the container (retry, diagnostics).
+COPY apps/api/scripts ./scripts
+# Container-level smoke test: `python /app/infrastructure/docker/container_check.py`.
+COPY infrastructure/docker/container_check.py ./infrastructure/docker/container_check.py
 
 # The engine, its node_modules and the shared Chromium cache. Owned by root and only read at
 # runtime, which is fine for the unprivileged user. Do NOT chown/chmod recursively here: rewriting

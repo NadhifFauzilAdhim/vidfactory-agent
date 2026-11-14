@@ -276,8 +276,11 @@ class ProviderFactory:
             elif port_name == "youtube":
                 ctx.youtube = adapter
 
-        if port_name in ("image", "tts", "video", "youtube"):
-            ctx.storage = get_storage()
+        # Storage is not a provider: it is always constructible (local or R2 from settings) and has no
+        # credential of its own. Injecting it for every agent avoids a class of bug where a new agent
+        # persists an artifact but its port is not in a hard-coded list. `code_scene` is exactly that
+        # case: its port is "llm", yet it stores one scene programme per scene.
+        ctx.storage = get_storage()
         return ctx
 
 

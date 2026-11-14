@@ -190,6 +190,11 @@ class RemotionRenderer:
                 "assets": assets,
                 "inputProps": {"spec": spec.spec},
             }
+            if any(
+                (scene or {}).get("mode") == "code" for scene in (spec.spec.get("scenes") or [])
+            ):
+                # A code scene mounts a nested document; the default frame timeout is too tight.
+                payload["frameTimeoutMs"] = 120000
             job_path.write_text(json.dumps(payload), encoding="utf-8")
             artifact, meta = await self._run_cli(spec, job_path, cancel_file, out, on_progress)
             if spec.stills_only:

@@ -92,6 +92,40 @@ const ROOT_PROPS: StoryboardProps = {
         caption: "By midnight, every boat could see the way home.",
         animation: {kenBurns: "out", entrance: "scale"},
       },
+      {
+        id: "m4",
+        index: 4,
+        title: "Code scene",
+        // Authored visuals: HTML/CSS/GSAP instead of an image. Edit this object in the Studio's Data
+        // panel to try your own scene, exactly like the code_scene agent produces one.
+        mode: "code",
+        prompt: "a harbour at dusk with a lantern",
+        code: {
+          runtime: 1,
+          html: '<div class="sun"></div><div class="horizon"></div><div class="city"><span class="b1"></span><span class="b2"></span><span class="b3"></span></div><div class="titles"><p class="kicker">scene 04</p><h1 class="headline">The lantern lit</h1><p class="rule"></p></div>',
+          css:
+            'body{background:linear-gradient(180deg,#0b1b2a 0%,#2a4a63 68%,#d9b07a 100%)}' +
+            ".horizon{position:absolute;left:0;right:0;top:64%;height:2px;background:rgba(255,255,255,.35)}" +
+            ".sun{position:absolute;left:62%;top:44%;width:14vw;height:14vw;border-radius:50%;background:radial-gradient(circle,#ffd98a 0%,#f2a65a 60%,transparent 72%)}" +
+            ".city{position:absolute;left:0;right:0;top:50%;height:14%;display:flex;align-items:flex-end;gap:1.2vw;padding:0 6vw}" +
+            ".city span{display:block;background:#0e1626;border-radius:3px 3px 0 0;width:6vw}" +
+            ".b1{height:42%}.b2{height:74%}.b3{height:56%}" +
+            '.titles{position:absolute;left:7vw;bottom:18vh}.kicker{font:500 1vw/1.2 ui-monospace,monospace;letter-spacing:.28em;text-transform:uppercase;color:var(--accent, #d6ff45)}' +
+            '.headline{margin-top:1.4vh;font:italic 400 5.4vw/1.02 Georgia,serif;color:#f7f3ea}' +
+            '.rule{margin-top:1.8vh;width:9vw;height:2px;background:var(--accent, #d6ff45);transform-origin:left center}',
+          js:
+            "const tl = gsap.timeline({paused: true});" +
+            'tl.from(".sun", {y: 60, opacity: 0, duration: 1.2, ease: "power2.out"}, 0);' +
+            'tl.from(".city span", {y: 90, duration: 0.7, stagger: 0.07, ease: "power3.out"}, 0.2);' +
+            'tl.from(".headline", {opacity: 0, y: 26, duration: 0.9, ease: "power3.out"}, 0.7);' +
+            'tl.fromTo(".rule", {scaleX: 0}, {scaleX: 1, duration: 0.8, ease: "power2.inOut"}, 1.2);' +
+            "window.__timelines.push(tl);",
+        },
+        narrationSrc: null,
+        durationS: 4.5,
+        transition: "fade",
+        caption: "She lit the lantern and the whole harbour answered.",
+      },
     ],
   },
 };

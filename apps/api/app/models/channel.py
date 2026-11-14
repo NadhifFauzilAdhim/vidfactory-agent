@@ -50,6 +50,8 @@ class Channel(UUIDMixin, TimestampMixin, SoftDeleteMixin, Base):
     # How scenes are illustrated:
     #   "image"       — generate one image per scene with the image provider (default)
     #   "generative"  — no image provider: Remotion composes each scene from its visual prompt
+    #   "code"        — no image provider: the LLM writes each scene as HTML/CSS/GSAP, rendered
+    #                   in a sandboxed iframe (see docs/11-code-scenes.md)
     visual_mode: Mapped[str] = mapped_column(String(16), default="image", server_default="image")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 

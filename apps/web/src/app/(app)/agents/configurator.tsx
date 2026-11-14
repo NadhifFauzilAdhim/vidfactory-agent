@@ -26,6 +26,9 @@ export function AgentConfigurator({ agent, providers }: { agent: Agent; provider
 
   const provider = eligible.find((p) => p.id === form.provider_id);
   const needsProvider = ["llm", "tts", "image", "youtube"].includes(agent.port);
+  // Only an agent that calls a language model has a token budget. Image/tts/video/rules agents
+  // have no token parameter on their provider, so their fields stay read-only.
+  const canTuneGeneration = agent.port === "llm";
 
   async function save() {
     setPending(true);
@@ -106,7 +109,7 @@ export function AgentConfigurator({ agent, providers }: { agent: Agent; provider
                 max={2}
                 step={0.1}
                 value={form.temperature}
-                disabled={agent.port !== "llm"}
+                disabled={!canTuneGeneration}
                 onChange={(e) => setForm({ ...form, temperature: Number(e.target.value) })}
               />
             </label>
@@ -117,7 +120,7 @@ export function AgentConfigurator({ agent, providers }: { agent: Agent; provider
                 min={256}
                 max={128000}
                 value={form.max_tokens}
-                disabled={agent.port !== "llm"}
+                disabled={!canTuneGeneration}
                 onChange={(e) => setForm({ ...form, max_tokens: Number(e.target.value) })}
               />
             </label>

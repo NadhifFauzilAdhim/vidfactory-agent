@@ -98,15 +98,20 @@ export function ChannelSettingsForm({ channel }: { channel: Channel }) {
           hint={
             form.visual_mode === "generative"
               ? "Remotion composes each scene from its prompt — no image provider used"
-              : "One generated image per scene, animated by Remotion"
+              : form.visual_mode === "code"
+                ? "The LLM writes each scene as HTML/CSS/GSAP — no image provider used"
+                : "One generated image per scene, animated by Remotion"
           }
         >
           <Select
             value={form.visual_mode}
-            onChange={(e) => setForm({ ...form, visual_mode: e.target.value as "image" | "generative" })}
+            onChange={(e) =>
+              setForm({ ...form, visual_mode: e.target.value as "image" | "generative" | "code" })
+            }
           >
             <option value="image">Generated images</option>
             <option value="generative">Remotion only (no images)</option>
+            <option value="code">Written by AI (HTML/CSS/GSAP)</option>
           </Select>
         </Field>
       </div>

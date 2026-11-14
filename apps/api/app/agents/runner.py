@@ -22,7 +22,15 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class StructuredOutputError(ProviderError):
-    pass
+    """The provider answered, but not with a usable JSON object.
+
+    Carries ``usage`` when tokens were spent anyway, so a failed attempt is still billed and the
+    operator can see how much a bad scene actually cost.
+    """
+
+    def __init__(self, message: str, *, usage: Usage | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage
 
 
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
@@ -72,9 +80,20 @@ class StructuredRunner:
         try:
             return output_model.model_validate_json(extract_json(result.content)), result.usage
         except (ValidationError, ValueError) as exc:
+            if not result.content.strip() and not repair:
+                # A blank body is not a schema problem: the provider spent its whole output budget on
+                # reasoning, or returned an empty block. Say so, because "Invalid JSON: EOF" sends
+                # whoever reads the log looking in the wrong place.
+                raise StructuredOutputError(
+                    f"{output_model.__name__} got an empty response from "
+                    f"{result.usage.provider or 'the provider'} "
+                    f"({result.usage.output_tokens} output tokens). The model likely exhausted "
+                    f"max_tokens={max_tokens} before emitting any text.",
+                    usage=result.usage,
+                ) from exc
             if not repair:
                 raise StructuredOutputError(
-                    f"{output_model.__name__} validation failed: {exc}"
+                    f"{output_model.__name__} validation failed: {exc}", usage=result.usage
                 ) from exc
             log.warning("structured repair round for %s", output_model.__name__)
             messages.append(Message("assistant", result.content))

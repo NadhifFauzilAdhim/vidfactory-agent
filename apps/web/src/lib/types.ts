@@ -52,7 +52,7 @@ export type Channel = {
   video_format: "16:9" | "9:16" | "1:1";
   accent_color: string;
   /** "image" = one generated image per scene · "generative" = Remotion composes scenes from prompts. */
-  visual_mode?: "image" | "generative";
+  visual_mode?: "image" | "generative" | "code";
   is_active: boolean;
   youtube_channel_id: string | null;
   youtube_channel_title: string | null;
@@ -389,6 +389,7 @@ export type Scene = {
   image_url: string | null;
   audio_url: string | null;
   audio_duration_s: number | null;
+  code_url: string | null;
 };
 
 export type QualityReport = {

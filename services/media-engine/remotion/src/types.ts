@@ -37,6 +37,21 @@ export type SceneAnimation = {
   transitionDurationInFrames?: number;
 };
 
+/**
+ * A scene authored as code by the LLM (HTML + CSS + optional GSAP). Rendered in a sandboxed iframe
+ * by `code-scene.tsx`; see `code-runtime.ts` for the seek contract.
+ */
+export type SceneCode = {
+  /** Body markup for the stage. No document-level tags; the runtime supplies them. */
+  html: string;
+  /** Stylesheet applied inside the iframe document. */
+  css?: string | null;
+  /** GSAP code that registers paused timelines on `window.__timelines`. */
+  js?: string | null;
+  /** Contract version; scenes written for another runtime fall back to generative. */
+  runtime: 1;
+};
+
 export type StoryboardScene = {
   id: string;
   index: number;
@@ -45,8 +60,11 @@ export type StoryboardScene = {
    * How the scene is drawn:
    *  - "asset" (default) — a generated image or video clip
    *  - "generative" — no image at all: the scene is composed procedurally from the prompt
+   *  - "code" — the scene is HTML/CSS/GSAP written by the LLM
    */
-  mode?: "asset" | "generative";
+  mode?: "asset" | "generative" | "code";
+  /** The scene's authored code. Absent means the scene falls back to generative. */
+  code?: SceneCode | null;
   /** The visual prompt the storyboard agent wrote (used by generative scenes). */
   prompt?: string | null;
   /** Bundle-relative asset path (staticFile-style), resolved by the render job. */

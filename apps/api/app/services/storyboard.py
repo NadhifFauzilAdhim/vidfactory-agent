@@ -115,6 +115,8 @@ class RenderScene:
     scene: Scene
     image: MediaAsset | None
     audio: AudioAsset | None
+    #: LLM-authored scene programme (HTML/CSS/GSAP) when the channel runs in ``code`` mode.
+    code: MediaAsset | None = None
 
     @property
     def duration_s(self) -> float:
@@ -209,7 +211,20 @@ async def load_scenes(
             )
         ).scalars()
     }
-    return [RenderScene(scene=s, image=images.get(s.id), audio=audio.get(s.id)) for s in scenes]
+    code = {
+        a.scene_id: a
+        for a in (
+            await session.execute(
+                select(MediaAsset).where(
+                    MediaAsset.project_id == project.id, MediaAsset.kind == "code"
+                )
+            )
+        ).scalars()
+    }
+    return [
+        RenderScene(scene=s, image=images.get(s.id), audio=audio.get(s.id), code=code.get(s.id))
+        for s in scenes
+    ]
 
 
 async def load_storyboard(session: AsyncSession, project: ContentProject) -> Storyboard | None:
@@ -259,8 +274,13 @@ def build_spec(
         s = item.scene
         image_asset = _asset_url(item.image)
         audio_asset = _asset_url(item.audio)
+        # Code scenes stage their programme as a JSON asset and are played by the CodeScene
+        # component; a scene without stored code keeps the prompt so the renderer can fall back.
+        code_asset = _asset_url(item.code) if visual_mode == "code" else None
         if image_asset:
             assets.append(image_asset)
+        if code_asset:
+            assets.append(code_asset)
         if audio_asset:
             assets.append(audio_asset)
         entry: dict[str, Any] = {
@@ -282,6 +302,8 @@ def build_spec(
         }
         if image_asset:
             entry["assetKey"] = image_asset["key"]
+        if code_asset:
+            entry["codeKey"] = code_asset["key"]
         if audio_asset:
             entry["narrationKey"] = audio_asset["key"]
             entry["narrationDurationS"] = round(float(item.audio.duration_s or 0), 3) if item.audio else 0

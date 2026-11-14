@@ -55,6 +55,9 @@ log = get_logger("factory.render")
 #: Failures worth retrying (infrastructure / transient). Data problems are not retried.
 RETRYABLE_CODES = {"render_failed", "engine_unavailable", "render_timeout"}
 
+#: Statuses that mean "this job is computing". Shared with the pipeline's duplicate-render guard.
+ACTIVE_RENDER_STATES_FOR_JOB = ("queued", "bundling", "rendering", "encoding", "validating")
+
 
 @dataclass(slots=True)
 class EnqueueResult:
@@ -106,6 +109,7 @@ class RenderService:
         Safe to call from more than one process: a job another runner already claimed is left alone.
         """
         async with SessionFactory() as session:
+            settings = get_settings()
             stale = list(
                 (
                     await session.execute(
@@ -118,11 +122,19 @@ class RenderService:
                 ).scalars()
             )
             for job in stale:
-                job.status = "failed"
-                job.stage = "failed"
-                job.error_code = "interrupted"
-                job.error_message = "The render worker restarted before this job finished."
-                job.finished_at = datetime.now(UTC)
+                if job.attempts < (job.max_attempts or settings.render_max_attempts):
+                    # Nothing is rendering it (we just started, so no worker owns it yet). Re-queue
+                    # instead of failing: a job interrupted mid-render has already been paid for.
+                    job.status = "queued"
+                    job.stage = "queued"
+                    job.progress = 0
+                    job.error_message = "Re-queued after an interrupted attempt."
+                else:
+                    job.status = "failed"
+                    job.stage = "failed"
+                    job.error_code = "interrupted"
+                    job.error_message = "The render worker restarted before this job finished."
+                    job.finished_at = datetime.now(UTC)
             if stale:
                 await session.commit()
                 log.warning("render.recovered_stale jobs=%s", len(stale))
@@ -264,8 +276,11 @@ class RenderService:
             missing = wanted - {s.scene.index for s in scenes}
             if missing:
                 raise ValidationAppError(f"Unknown scene indexes: {sorted(missing)}")
+        # Code scenes are rendered from their stored programme, like generative ones are rendered
+        # from the prompt; neither needs an image asset.
         unavailable = (
-            [] if getattr(channel, "visual_mode", "image") == "generative"
+            []
+            if getattr(channel, "visual_mode", "image") in ("generative", "code")
             else [i.scene.index for i in scenes if i.image is None]
         )
         if unavailable and kind == "full":
@@ -300,18 +315,34 @@ class RenderService:
         )
 
         key = idempotency_key or _fingerprint(plan, kind, scene_indexes)
+        # The table has a UNIQUE index on idempotency_key, so only ONE row may ever carry it —
+        # including a failed row. Looking only for active/succeeded rows let a failed job keep the
+        # key, and the next insert died on uq_render_job_idempotency (reported as
+        # PendingRollbackError, invisible in the workflow log). A failed job is retryable; a
+        # cancelled one is the operator's decision and must not be silently revived.
         existing = await session.scalar(
-            select(RenderJob).where(
+            select(RenderJob)
+            .where(
                 RenderJob.project_id == project.id,
                 RenderJob.idempotency_key == key,
-                RenderJob.status.in_(["queued", "bundling", "rendering", "encoding", "validating",
-                                      "succeeded"]),
             )
+            .order_by(RenderJob.queued_at.desc())
+            .limit(1)
         )
-        if existing is not None:
-            return EnqueueResult(job=existing, reused=True)
-
         settings = get_settings()
+        if existing is not None:
+            action, existing = resolve_existing_job(existing, workflow_id=workflow_id)
+            if action == "reuse":
+                return EnqueueResult(job=existing, reused=True)
+            # A revived row must be committed before the worker can claim it.
+            await session.commit()
+            log.info("render.requeued_failed job=%s", existing.id)
+            self._ensure_workers(settings.render_concurrency)
+            self._known.add(existing.id)
+            self._queued_ids.add(existing.id)
+            await self._queue.put(existing.id)
+            return EnqueueResult(job=existing, reused=False)
+
         job = RenderJob(
             workspace_id=project.workspace_id,
             project_id=project.id,
@@ -337,10 +368,11 @@ class RenderService:
         await session.commit()
         self._ensure_workers(settings.render_concurrency)
         self._known.add(job.id)
+        # Claim before queueing: the row must say "bundling" before any worker can pick it up, so a
+        # second runner skips it and a worker never sees a job it is not allowed to render.
+        await self._claim(session, job.id)
         self._queued_ids.add(job.id)
         await self._queue.put(job.id)
-        # The row must say "claimed" before a worker can pick it up, so a second runner skips it.
-        await self._claim(session, job.id)
         log.info("render.enqueued job=%s template=%s scenes=%s", job.id, plan.template_id, len(scenes))
         return EnqueueResult(job=job, reused=False)
 
@@ -360,17 +392,17 @@ class RenderService:
                 log.info("render.execute_skipped job=%s reason=%s", job_id,
                          "missing" if job is None else "cancel_requested")
                 return
-            # Ownership: a job put on this process's queue is already ours; anything else is claimed
-            # atomically so the API and a separate worker never render the same job twice.
-            if job.status == "queued" and job_id not in self._queued_ids:
-                if not await self._claim(session, job_id):
-                    return
-            # Re-read after the claim: the row was updated by a different session, and committing
-            # this session's stale copy would undo the status change.
-            session.expire_all()
-            job = await session.get(RenderJob, job_id)
-            if job is None or job.status != "bundling":
-                return  # cancelled or failed while waiting
+            # Ownership: claim atomically so the API and a separate worker never render the same job
+            # twice. A job already in "bundling" was claimed by enqueue in this process (or by a
+            # previous pickup), so it is ours to execute. The old check keyed off `_queued_ids`,
+            # which raced: a worker that picked the job up between `queue.put()` and `_claim()`
+            # saw status "queued", skipped the claim, then bailed on the "bundling" check — leaving
+            # the job stuck in bundling forever with no process rendering it.
+            decision = should_execute(job.status)
+            if decision == "skip":
+                return
+            if decision == "claim" and not await self._claim(session, job_id):
+                return
             spec = await self._spec_for(session, job)
             if spec is None:
                 job.status = "failed"
@@ -680,6 +712,52 @@ def _fingerprint(plan: sb.StoryboardPlan, kind: str, scene_indexes: list[int] | 
 
 
 _SERVICE: RenderService | None = None
+
+
+def should_execute(status: str) -> str:
+    """What to do with a picked-up job: ``claim``, ``execute`` or ``skip``.
+
+    Kept as a pure function because the rule is subtle and once wrong: "bundling" is not a reason to
+    skip a job, it is the proof that someone already claimed it.
+    """
+    if status == "queued":
+        return "claim"
+    if status == "bundling":
+        return "execute"
+    return "skip"
+
+
+def resolve_existing_job(
+    job: RenderJob, *, workflow_id: str | None
+) -> tuple[str, RenderJob]:
+    """Decide what to do with a row that already owns this idempotency key.
+
+    Returns ``("reuse", job)`` when the job is still meaningful, ``("requeue", job)`` when a failed
+    job is being retried (the row is reset in place), and raises for cancelled work — reviving an
+    operator's cancellation would render a video they stopped.
+    """
+    if job.status in ACTIVE_RENDER_STATES_FOR_JOB or job.status == "succeeded":
+        return "reuse", job
+    if job.status == "failed":
+        # Reuse the row: it owns the UNIQUE key, so inserting another one is impossible.
+        job.status = "queued"
+        job.stage = "queued"
+        job.progress = 0
+        job.error_code = None
+        job.error_message = None
+        job.worker_pid = None
+        job.queued_at = datetime.now(UTC)
+        job.started_at = None
+        job.finished_at = None
+        job.output_key = None
+        if job.attempts >= job.max_attempts:
+            job.attempts = 0
+        if workflow_id:
+            job.workflow_id = workflow_id
+        return "requeue", job
+    raise ConflictError(
+        f"This render was {job.status}; start a new attempt instead of reusing it"
+    )
 
 
 def render_service() -> RenderService:

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
+from app.agents.code_scene import CodeSceneAgent
 from app.agents.generation import (
     PLANNER_SYSTEM,
     SCRIPT_SYSTEM,
@@ -117,6 +118,20 @@ _SPECS: list[AgentSpec] = [
         stage="visual",
         port="image",
         agent=VisualGenerationAgent,
+    ),
+    AgentSpec(
+        key="code_scene",
+        name="Code Scene",
+        role="Writes scene visuals as code",
+        description=(
+            "Writes one self-contained HTML/CSS/GSAP scene per storyboard scene instead of generating "
+            "an image. Every scene is validated for determinism, sandbox safety and size; scenes that "
+            "fail after one repair round fall back to the generative backdrop."
+        ),
+        category="generation",
+        stage="visual",
+        port="llm",
+        agent=CodeSceneAgent,
     ),
     AgentSpec(
         key="video_production",

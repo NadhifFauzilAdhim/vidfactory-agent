@@ -70,6 +70,11 @@ from app.services.youtube_oauth import refresh_access_token
 
 log = get_logger("factory.workflow")
 
+#: A render job in any of these states is still being computed. A second job for the same project
+#: must wait for it instead of starting a duplicate — the failure that produced two renders of
+#: "Kancing Kayu Danu" at 74% and 72%, both burning CPU and tokens for the same frames.
+ACTIVE_RENDER_STATES = ("queued", "bundling", "rendering", "encoding", "validating")
+
 STAGES = [
     "planning",
     "script_generation",
@@ -427,7 +432,15 @@ class ProductionPipeline:
 
     async def _record_usage(self, workflow, channel, ctx, result, agent_key: str, operation: str) -> None:
         usage = result.usage
-        request_key = f"{workflow.workflow_key}:{agent_key}:{self.step}:{getattr(ctx, 'request_key', '')}"
+        # `step` restarts at 0 on every attempt, so the key must also carry the attempt number;
+        # otherwise a retry reuses a key an earlier attempt already committed and the flush dies on
+        # uq_usage_request_key. The lookup alone cannot see pending rows in this session, which is
+        # exactly how the duplicate reached the database.
+        attempt = int(getattr(workflow, "retry_count", 0) or 0)
+        request_key = (
+            f"{workflow.workflow_key}:{agent_key}:a{attempt}:{self.step}:"
+            f"{getattr(ctx, 'request_key', '')}"
+        )
         cost = float(usage.cost_usd or 0)
         # Cost is only attributed when provider pricing is configured (per model), otherwise 0.
         existing = await self.session.scalar(
@@ -462,6 +475,118 @@ class ProductionPipeline:
                 project.total_cost_usd = float(project.total_cost_usd or 0) + cost
         await self.session.flush()
 
+    # -- resume helpers ---------------------------------------------------
+
+    async def _log_reused(self, workflow, stage: str, detail: str) -> None:
+        """Say out loud that a stage was skipped, so the log explains where the tokens went."""
+        await self.repo.log(
+            workflow.id,
+            f"{stage} reused · {detail} (already produced by an earlier attempt)",
+        )
+        await self.session.commit()
+
+    async def _reuse_project(self, workflow) -> ContentProject | None:
+        """The project a previous attempt already planned, if it is still usable."""
+        if not workflow.project_id:
+            return None
+        project = await self.session.get(ContentProject, workflow.project_id)
+        if project is None or project.deleted_at is not None:
+            return None
+        return project
+
+    async def _reuse_script(self, project: ContentProject) -> Script | None:
+        return await self.session.scalar(
+            select(Script).where(Script.project_id == project.id, Script.is_current.is_(True))
+        )
+
+    async def _reuse_storyboard(self, script: Script) -> Storyboard | None:
+        return await self.session.scalar(
+            select(Storyboard).where(
+                Storyboard.script_id == script.id, Storyboard.is_current.is_(True)
+            )
+        )
+
+    async def _has_narration(self, project: ContentProject, scenes: list[Scene]) -> bool:
+        """True when every scene already has usable narration audio.
+
+        TTS is billed per character, so re-synthesising on every retry is the single most expensive
+        mistake a resume can make. A scene counts as done only with a positive duration: a row that
+        failed mid-write must be regenerated.
+        """
+        if not scenes:
+            return False
+        rows = list(
+            (
+                await self.session.execute(
+                    select(AudioAsset).where(
+                        AudioAsset.project_id == project.id, AudioAsset.kind == "narration"
+                    )
+                )
+            ).scalars()
+        )
+        have = {a.scene_id for a in rows if float(a.duration_s or 0) > 0 and a.storage_key}
+        return all(s.id in have for s in scenes)
+
+    async def _has_visuals(self, project: ContentProject, scenes: list[Scene], channel) -> bool:
+        """True when every scene already has the asset its visual mode needs."""
+        mode = getattr(channel, "visual_mode", "image")
+        if mode == "generative":
+            # Nothing is generated for this mode; the stage is a log entry, so re-running is free.
+            return False
+        if not scenes:
+            return False
+        kind = "code" if mode == "code" else "image"
+        return not await self._scenes_missing_visuals(project, scenes, kind)
+
+    async def _scenes_missing_visuals(
+        self, project: ContentProject, scenes: list[Scene], kind: str
+    ) -> list[Scene]:
+        """Scenes without an asset of ``kind`` — the only ones a retry should pay to generate.
+
+        Regenerating a scene that already succeeded would re-bill an LLM/image call for work that is
+        already on disk, which is exactly the waste a resume is supposed to avoid.
+        """
+        if not scenes:
+            return []
+        rows = list(
+            (
+                await self.session.execute(
+                    select(MediaAsset).where(
+                        MediaAsset.project_id == project.id,
+                        MediaAsset.kind == kind,
+                        MediaAsset.deleted_at.is_(None),
+                    )
+                )
+            ).scalars()
+        )
+        have = {a.scene_id for a in rows if a.storage_key}
+        return [s for s in scenes if s.id not in have]
+
+    async def _reuse_qc(self, project: ContentProject, render: VideoRender) -> QualityReport | None:
+        """A report is reusable only if it judged this exact render."""
+        report = await self.session.scalar(
+            select(QualityReport)
+            .where(QualityReport.project_id == project.id)
+            .order_by(QualityReport.created_at.desc())
+            .limit(1)
+        )
+        if report is None:
+            return None
+        if report.render_id is not None and report.render_id == render.id:
+            return report
+        # Legacy rows without a render_id: fall back to comparing timestamps.
+        rendered_at = render.completed_at or render.created_at
+        if rendered_at is None or report.created_at is None:
+            return None
+        return report if report.created_at >= rendered_at else None
+
+    async def _reuse_seo(self, project: ContentProject) -> dict | None:
+        """Metadata is reusable when it exists and its thumbnail was produced."""
+        seo = (project.metadata_json or {}).get("seo")
+        if not seo or project.thumbnail_asset_id is None:
+            return None
+        return seo
+
     # -- stages ----------------------------------------------------------
 
     async def run(self, workflow_id: uuid.UUID, *, stop_at_approval: bool = True) -> str:
@@ -481,14 +606,36 @@ class ProductionPipeline:
             self.session.add(setting)
             await self.session.flush()
 
-        workflow.status = workflow.status if workflow.status not in ("pending",) else "planning"
+        # `pending` means "queued, not started". A resumed workflow is already past planning, so
+        # labelling it `planning` made a run that died in visuals look like it never left planning.
+        # The CHECK constraint allows only stage names, so start it at the stage it resumes from.
+        if workflow.status == "pending":
+            workflow.status = workflow.stage if workflow.stage in STAGES else "planning"
         workflow.started_at = workflow.started_at or datetime.now(UTC)
         await self.ensure_budget(workflow.workspace_id)
 
         try:
-            project = await self._stage_planning(workflow, channel, setting)
-            script = await self._stage_script(workflow, channel, project)
-            storyboard = await self._stage_storyboard(workflow, channel, project, script, setting)
+            # Resume semantics: every stage is skipped when its output is already persisted, so a
+            # retry pays only for the work that actually failed. Without this, a retry re-bills
+            # planning, script, storyboard, TTS and visuals — the most expensive stages.
+            project = await self._reuse_project(workflow)
+            if project is None:
+                project = await self._stage_planning(workflow, channel, setting)
+            else:
+                await self._log_reused(workflow, "planning", project.title)
+
+            script = await self._reuse_script(project)
+            if script is None:
+                script = await self._stage_script(workflow, channel, project)
+            else:
+                await self._log_reused(workflow, "script", f"v{script.version}")
+
+            storyboard = await self._reuse_storyboard(script)
+            if storyboard is None:
+                storyboard = await self._stage_storyboard(workflow, channel, project, script, setting)
+            else:
+                await self._log_reused(workflow, "storyboard", f"v{storyboard.version}")
+
             scenes = list(
                 (
                     await self.session.execute(
@@ -496,11 +643,30 @@ class ProductionPipeline:
                     )
                 ).scalars()
             )
-            await self._stage_voice(workflow, channel, project, scenes)
-            await self._stage_visual(workflow, channel, project, scenes, setting)
+            if not await self._has_narration(project, scenes):
+                await self._stage_voice(workflow, channel, project, scenes)
+            else:
+                await self._log_reused(workflow, "voice", f"{len(scenes)} scenes")
+
+            if not await self._has_visuals(project, scenes, channel):
+                await self._stage_visual(workflow, channel, project, scenes, setting)
+            else:
+                await self._log_reused(workflow, "visuals", f"{len(scenes)} scenes")
+
             render = await self._stage_render(workflow, channel, project, storyboard)
-            report = await self._stage_qc(workflow, channel, project, setting, scenes, render)
-            metadata = await self._stage_seo(workflow, channel, project, setting)
+
+            report = await self._reuse_qc(project, render)
+            if report is None:
+                report = await self._stage_qc(workflow, channel, project, setting, scenes, render)
+            else:
+                await self._log_reused(workflow, "quality control", f"score {report.score:.0f}")
+
+            metadata = await self._reuse_seo(project)
+            if metadata is None:
+                metadata = await self._stage_seo(workflow, channel, project, setting)
+            else:
+                await self._log_reused(workflow, "metadata", "already generated")
+
             await self._stage_approval(workflow, channel, setting, project, report, stop_at_approval)
             if stop_at_approval:
                 raise ApprovalPending()
@@ -742,12 +908,35 @@ class ProductionPipeline:
 
     async def _stage_voice(self, workflow, channel, project, scenes: list[Scene]) -> None:
         await self._check_cancel(workflow)
+        # Only scenes without usable narration: TTS is billed per character, so a retry must not
+        # re-synthesise audio that already exists on disk.
+        existing = {
+            a.scene_id
+            for a in (
+                await self.session.execute(
+                    select(AudioAsset).where(
+                        AudioAsset.project_id == project.id, AudioAsset.kind == "narration"
+                    )
+                )
+            ).scalars()
+            if float(a.duration_s or 0) > 0 and a.storage_key
+        }
+        pending = [s for s in scenes if s.id not in existing]
+        if not pending:
+            await self._log_reused(workflow, "voice", f"{len(scenes)} scenes")
+            return
+        if len(pending) < len(scenes):
+            await self.repo.log(
+                workflow.id,
+                f"Narration: synthesising {len(pending)} of {len(scenes)} scenes "
+                f"({len(scenes) - len(pending)} already present)",
+            )
         reqs = [
             VoiceSceneRequest(scene_id=str(s.id), index=s.index, text=s.narration)
-            for s in scenes
+            for s in pending
         ]
         voice_override = (workflow.input_json or {}).get("voice") or None
-        characters = sum(len(s.narration or "") for s in scenes)
+        characters = sum(len(s.narration or "") for s in pending)
         self.step += 1
         ctx, result = await self._run_agent(
             workflow, channel, "voice_generation",
@@ -826,7 +1015,8 @@ class ProductionPipeline:
 
     async def _stage_visual(self, workflow, channel, project, scenes: list[Scene], setting) -> None:
         await self._check_cancel(workflow)
-        if getattr(channel, "visual_mode", "image") == "generative":
+        mode = getattr(channel, "visual_mode", "image")
+        if mode == "generative":
             # No image provider call: Remotion composes every scene from its visual prompt, so the
             # stage completes immediately and records why no assets exist.
             task = await self.repo.start_task(
@@ -850,10 +1040,24 @@ class ProductionPipeline:
             )
             await self.session.commit()
             return
+        if mode == "code":
+            await self._stage_code_visual(workflow, channel, project, scenes, setting)
+            return
+        # Only scenes without an image: a retry must not pay for art it already has.
+        pending = await self._scenes_missing_visuals(project, scenes, "image")
+        if not pending:
+            await self._log_reused(workflow, "visuals", f"{len(scenes)} scenes")
+            return
+        if len(pending) < len(scenes):
+            await self.repo.log(
+                workflow.id,
+                f"Visuals: generating {len(pending)} of {len(scenes)} scenes "
+                f"({len(scenes) - len(pending)} already present)",
+            )
         reqs = [
             VisualSceneRequest(scene_id=str(s.id), index=s.index, prompt=s.image_prompt,
                                negative_prompt=s.negative_prompt)
-            for s in scenes
+            for s in pending
         ]
         self.step += 1
         ctx, result = await self._run_agent(
@@ -884,8 +1088,160 @@ class ProductionPipeline:
             )
         await self.repo.finish_task(task, output=result.output.model_dump(), usage=result.usage,
                                     provider=result.provider, model=result.model)
-        await self.repo.log(workflow.id, f"Visuals generated · {len(scenes)} assets", task_id=task.id,
+        await self.repo.log(workflow.id, f"Visuals generated · {len(reqs)} assets", task_id=task.id,
                             warnings=result.warnings)
+        await self.session.commit()
+
+    async def _stage_code_visual(self, workflow, channel, project, scenes, setting) -> None:
+        """Write one HTML/CSS/GSAP scene per storyboard scene with the LLM (``visual_mode="code"``).
+
+        Each accepted scene is stored as a small JSON programme in object storage and recorded as a
+        ``MediaAsset(kind="code")``; scenes that fail validation after the repair round are stored
+        with ``status="fallback"`` and no asset, so the renderer uses the generative backdrop for
+        them instead of failing the whole video.
+        """
+        import json as _json
+        import uuid as _uuid
+
+        from app.agents.code_scene import CodeSceneRequest, CodeSceneRequestBatch
+        from app.models import RenderJob
+        from app.services.scene_code import is_renderable
+
+        width, height = _resolution(channel.video_format)
+        template_id = (workflow.input_json or {}).get("template") or "youtube-editorial"
+        from app.services import storyboard as _sb
+        from app.services.storyboard import TEMPLATES
+
+        template = TEMPLATES.get(template_id, TEMPLATES[_sb.DEFAULT_TEMPLATE])
+        fps = int((workflow.input_json or {}).get("fps") or 30)
+        # Only scenes without code: a retry must not re-bill the LLM for scenes already written.
+        pending = await self._scenes_missing_visuals(project, scenes, "code")
+        if not pending:
+            await self._log_reused(workflow, "visuals", f"{len(scenes)} scenes")
+            return
+        # A render already in flight is the real answer: another workflow is mid-compute on exactly
+        # these scenes. Rewriting them would pay the LLM again and change the frames under a running
+        # encoder. Wait for that render instead.
+        active = await self.session.scalar(
+            select(RenderJob)
+            .where(
+                RenderJob.project_id == project.id,
+                RenderJob.status.in_(ACTIVE_RENDER_STATES),
+            )
+            .order_by(RenderJob.queued_at.desc())
+            .limit(1)
+        )
+        if active is not None:
+            await self.repo.log(
+                workflow.id,
+                f"Visuals: skipped — a render is already in progress ({active.status} "
+                f"{active.progress}%), so these scenes are already written",
+            )
+            await self.session.commit()
+            return
+        if len(pending) < len(scenes):
+            await self.repo.log(
+                workflow.id,
+                f"Visuals: writing {len(pending)} of {len(scenes)} scenes "
+                f"({len(scenes) - len(pending)} already coded)",
+            )
+        # Neighbouring lines give the shot a job: set up what the next line pays off.
+        ordered = sorted(scenes, key=lambda s: s.index)
+        previous = {
+            s.index: (ordered[i - 1].narration or "") for i, s in enumerate(ordered) if i > 0
+        }
+        following = {
+            s.index: (ordered[i + 1].narration or "")
+            for i, s in enumerate(ordered)
+            if i + 1 < len(ordered)
+        }
+        reqs = [
+            CodeSceneRequest(
+                scene_id=str(s.id),
+                index=s.index,
+                title=s.title or f"Scene {s.index}",
+                prompt=s.image_prompt or s.narration or "",
+                narration=s.narration or "",
+                duration_s=float(s.duration_s or 5),
+                width=width,
+                height=height,
+                fps=fps,
+                accent=getattr(channel, "accent_color", None) or template["accent"],
+                background=template["background"],
+                ink=template["ink"],
+                palette=[template["accent"], template["background"], template["ink"]],
+                previous_narration=previous.get(s.index, ""),
+                next_narration=following.get(s.index, ""),
+            )
+            for s in pending
+        ]
+        self.step += 1
+        ctx, result = await self._run_agent(
+            workflow,
+            channel,
+            "code_scene",
+            CodeSceneRequestBatch(
+                niche=getattr(channel, "niche", "") or "stories",
+                audience=getattr(channel, "audience", "") or "general",
+                style_suffix=getattr(setting, "visual_style", "") or "",
+                scenes=reqs,
+            ),
+            stage="visual_generation",
+            extra_params={"fps": fps, "template": template_id},
+        )
+        storage = ctx.require_storage()
+        task = await self.repo.start_task(
+            workflow, "visual_generation", self.step, {"mode": "code", "scenes": len(reqs)}
+        )
+        by_index = {s.index: s for s in scenes}
+        written = 0
+        fallbacks: list[int] = []
+        for scene_result in result.output.scenes:
+            scene = by_index.get(scene_result.index)
+            if not is_renderable(scene_result.code):
+                fallbacks.append(scene_result.index)
+                continue
+            key = (
+                f"p/{project.id}/code/scene-{scene_result.index:02d}-"
+                f"{scene_result.checksum[:12] or _uuid.uuid4().hex}.json"
+            )
+            stored = await storage.put_bytes(
+                key,
+                _json.dumps(scene_result.code, ensure_ascii=False).encode("utf-8"),
+                "application/json",
+            )
+            self.session.add(
+                MediaAsset(
+                    workspace_id=workflow.workspace_id,
+                    project_id=project.id,
+                    scene_id=scene.id if scene else None,
+                    kind="code",
+                    storage_key=stored.key,
+                    mime_type="application/json",
+                    bytes=stored.bytes,
+                    checksum_sha256=stored.checksum_sha256,
+                    provider=result.provider,
+                    model=result.model,
+                    license="ai-generated",
+                    prompt=scene.image_prompt if scene else None,
+                )
+            )
+            written += 1
+        await self.repo.finish_task(
+            task,
+            output={**result.output.model_dump(), "written": written, "fallback": fallbacks},
+            usage=result.usage,
+            provider=result.provider,
+            model=result.model,
+        )
+        warnings = list(result.warnings)
+        await self.repo.log(
+            workflow.id,
+            f"Visuals: code mode — {written}/{len(reqs)} scenes written by {result.model or 'LLM'}"
+            + (f", {len(fallbacks)} fall back to generative" if fallbacks else ""),
+            task_id=task.id,
+            warnings=warnings,
+        )
         await self.session.commit()
 
     async def _stage_render(self, workflow, channel, project, storyboard: Storyboard) -> VideoRender:
@@ -921,6 +1277,32 @@ class ProductionPipeline:
             )
             await self.session.commit()
             return existing
+
+        # A render already in flight for this project is not a reason to start another one. Before
+        # this guard, a retry queued a second job while the first was still encoding: both ran to
+        # completion, doubling CPU and wall time for identical output.
+        active = await self.session.scalar(
+            select(RenderJob)
+            .where(
+                RenderJob.project_id == project.id,
+                RenderJob.status.in_(ACTIVE_RENDER_STATES),
+            )
+            .order_by(RenderJob.queued_at.desc())
+            .limit(1)
+        )
+        if active is not None:
+            await self.repo.log(
+                workflow.id,
+                f"Render already in progress · {active.status} {active.progress}% — waiting for it "
+                "instead of queueing a duplicate",
+            )
+            await self.session.commit()
+            return await self._await_render(workflow, active.id, project)
+
+        # A VideoRender can outlive its job when the process dies mid-render: the row still says
+        # "rendering" while no job is computing anything. Left alone it makes later runs think a
+        # render is in flight and wait forever. Close the orphans before queueing.
+        await self._fail_orphan_renders(workflow, project)
 
         engine = await asyncio.to_thread(engine_status)
         if not engine["ok"]:
@@ -970,36 +1352,111 @@ class ProductionPipeline:
         )
         await self.session.commit()
 
+        return await self._await_render(workflow, job_id, project, task=task, render=render)
+
+    async def _fail_orphan_renders(self, workflow, project) -> None:
+        """Mark ``VideoRender`` rows that no live job backs as failed.
+
+        A render process killed mid-flight leaves ``status="rendering"`` behind. Without this, every
+        later attempt sees an "in progress" render, waits, and eventually times out — which is exactly
+        how this project ended up with two permanent ``rendering`` rows and no working job.
+        """
+        from app.models import RenderJob
+
+        stuck = list(
+            (
+                await self.session.execute(
+                    select(VideoRender).where(
+                        VideoRender.project_id == project.id,
+                        VideoRender.status.in_(("queued", "rendering")),
+                    )
+                )
+            ).scalars()
+        )
+        if not stuck:
+            return
+        live_job = await self.session.scalar(
+            select(RenderJob.id)
+            .where(
+                RenderJob.project_id == project.id,
+                RenderJob.status.in_(ACTIVE_RENDER_STATES),
+            )
+            .limit(1)
+        )
+        if live_job is not None:
+            return  # a real job is running; do not touch its render row
+        for orphan in stuck:
+            orphan.status = "failed"
+            orphan.error = "Render process stopped before finishing this video."
+        await self.session.commit()
+        await self.repo.log(
+            workflow.id,
+            f"Closed {len(stuck)} orphaned render record(s) left by a stopped process",
+        )
+        await self.session.commit()
+
+    async def _await_render(
+        self, workflow, job_id, project, *, task=None, render=None
+    ) -> VideoRender:
+        """Poll a render job until it finishes; attach the result to this workflow's task if any.
+
+        Shared by the "we queued it" and "someone else is already rendering it" paths, so a resume
+        waits on the existing job instead of starting a second one.
+        """
+        from app.models import RenderJob
+
+        workflow_pk = workflow.id
+        task_pk = task.id if task is not None else None
+        if render is None:
+            render = await self.session.scalar(
+                select(VideoRender)
+                .where(VideoRender.project_id == project.id, VideoRender.status == "rendering")
+                .order_by(VideoRender.created_at.desc())
+                .limit(1)
+            )
+        render_pk = render.id if render is not None else None
+
         deadline = datetime.now(UTC).timestamp() + get_settings().remotion_render_timeout_s + 300
-        last_reported = 0
-        render_pk, task_pk, workflow_pk = render.id, task.id, workflow.id
+        last_reported = -1
         while datetime.now(UTC).timestamp() < deadline:
             await asyncio.sleep(3)
             # A new transaction (not a rollback, which would expire every loaded object) makes the
             # render worker's commits visible; `populate_existing` refreshes the cached rows.
             await self.session.commit()
-            workflow_row = await self.session.get(ProductionWorkflow, workflow_pk, populate_existing=True)
+            workflow_row = await self.session.get(
+                ProductionWorkflow, workflow_pk, populate_existing=True
+            )
             if workflow_row is not None and workflow_row.status == "cancelled":
                 raise WorkflowCancelled("Workflow cancelled by operator")
             job = await self.session.get(RenderJob, job_id, populate_existing=True)
-            render = await self.session.get(VideoRender, render_pk, populate_existing=True)
-            task = await self.session.get(WorkflowTask, task_pk, populate_existing=True)
-            if job is None or render is None or task is None:
+            render = (
+                await self.session.get(VideoRender, render_pk, populate_existing=True)
+                if render_pk
+                else None
+            )
+            task = (
+                await self.session.get(WorkflowTask, task_pk, populate_existing=True)
+                if task_pk
+                else None
+            )
+            if job is None:
                 raise AppError("Render job disappeared")
             if job.status == "succeeded":
-                render.storage_key = job.output_key
-                render.duration_s = job.duration_s
-                render.bytes = job.bytes
-                render.status = "ready"
-                render.progress = 100
-                render.completed_at = datetime.now(UTC)
+                if render is not None:
+                    render.storage_key = job.output_key
+                    render.duration_s = job.duration_s
+                    render.bytes = job.bytes
+                    render.status = "ready"
+                    render.progress = 100
+                    render.completed_at = datetime.now(UTC)
                 usage = _Usage(provider="remotion", model=job.template_id, operation="render",
                                units=1, unit_label="render",
                                latency_ms=int((job.duration_s or 0) * 1000))
-                await self.repo.finish_task(task, output={
-                    "job_id": str(job.id), "key": job.output_key, "bytes": job.bytes,
-                    "duration_s": job.duration_s, "width": job.width, "height": job.height,
-                }, usage=usage, provider="remotion", model=job.template_id)
+                if task is not None:
+                    await self.repo.finish_task(task, output={
+                        "job_id": str(job.id), "key": job.output_key, "bytes": job.bytes,
+                        "duration_s": job.duration_s, "width": job.width, "height": job.height,
+                    }, usage=usage, provider="remotion", model=job.template_id)
                 await self.repo.log(
                     workflow_pk,
                     f"Render ready · {job.duration_s:.1f}s · {(job.bytes or 0) // 1024} KB · "
@@ -1007,16 +1464,29 @@ class ProductionPipeline:
                     task_id=task_pk,
                 )
                 await self.session.commit()
-                return render
+                if render is not None:
+                    return render
+                completed = await self.session.scalar(
+                    select(VideoRender)
+                    .where(VideoRender.project_id == project.id, VideoRender.status == "ready")
+                    .order_by(VideoRender.completed_at.desc())
+                    .limit(1)
+                )
+                if completed is None:
+                    raise AppError("Render finished but no video row was recorded")
+                return completed
             if job.status in ("failed", "cancelled"):
-                render.status = "failed"
-                render.error = job.error_message or job.error_code
-                await self.repo.finish_task(task, error=f"{job.error_code}: {job.error_message}")
+                if render is not None:
+                    render.status = "failed"
+                    render.error = job.error_message or job.error_code
+                if task is not None:
+                    await self.repo.finish_task(task, error=f"{job.error_code}: {job.error_message}")
                 await self.session.commit()
                 raise AppError(f"Render {job.status}: {job.error_message or job.error_code}")
             if job.progress - last_reported >= 20:
                 last_reported = job.progress
-                render.progress = job.progress
+                if render is not None:
+                    render.progress = job.progress
                 await self.repo.log(workflow_pk, f"Rendering {job.progress}% · {job.stage}",
                                     task_id=task_pk)
                 await self.session.commit()

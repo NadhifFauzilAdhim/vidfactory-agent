@@ -5,6 +5,49 @@ from __future__ import annotations
 import time
 
 
+def test_code_scene_context_receives_storage():
+    """Regression: code_scene's port is "llm" but it persists one programme per scene.
+
+    Storage used to be injected only for image/tts/video/youtube ports, so the code-scene stage
+    failed with "Storage is not configured" *after* the LLM had already been paid for.
+    """
+    import asyncio
+    import uuid
+    from types import SimpleNamespace
+
+    from app.agents.registry import REGISTRY
+    from app.container import ProviderFactory
+
+    spec = REGISTRY.get("code_scene")
+    assert spec.port == "llm"  # the port that used to be excluded
+
+    resolved = SimpleNamespace(
+        spec=spec,
+        provider=SimpleNamespace(id=uuid.uuid4()),
+        enabled=True,
+        model="test-model",
+        temperature=0.5,
+        max_tokens=4096,
+        system_prompt=None,
+        params={},
+    )
+    factory = ProviderFactory(session=None)  # type: ignore[arg-type]
+
+    async def fake_resolve(**_kwargs):
+        return resolved
+
+    async def fake_build(_provider):
+        return SimpleNamespace(name="test-llm")
+
+    factory.resolve_for_agent = fake_resolve  # type: ignore[method-assign]
+    factory.build = fake_build  # type: ignore[method-assign]
+    ctx = asyncio.run(
+        factory.build_context(workspace_id=uuid.uuid4(), agent_key="code_scene")
+    )
+    assert ctx.storage is not None
+    ctx.require_storage()  # what _stage_code_visual calls
+
+
 def test_health_endpoints(client):
     assert client.get("/api/v1/healthz").json()["status"] == "ok"
     assert client.get("/api/v1/readyz").json()["ready"] is True
@@ -23,8 +66,13 @@ def test_login_rejects_bad_password(client):
 
 def test_seeded_agents_and_providers(client, auth):
     agents = client.get("/api/v1/agents").json()
-    assert len(agents) == 10
-    assert {a["key"] for a in agents} >= {"content_planner", "quality_control", "publishing"}
+    assert len(agents) == 11
+    assert {a["key"] for a in agents} >= {
+        "content_planner",
+        "quality_control",
+        "publishing",
+        "code_scene",
+    }
     providers = client.get("/api/v1/providers").json()
     kinds = {p["kind"] for p in providers}
     assert {"llm", "tts", "image", "youtube"} <= kinds

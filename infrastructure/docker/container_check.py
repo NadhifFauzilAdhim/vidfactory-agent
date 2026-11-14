@@ -1,4 +1,10 @@
-"""Container check: render one 2-scene composition with the engine baked into the image."""
+"""Container check: render a 3-scene composition with the engine baked into the image.
+
+Scene 1 and 2 are plain (image-less) scenes; scene 3 is a **code scene** — HTML/CSS/GSAP staged as a
+``codeKey`` asset and mounted in the sandboxed iframe. That is the part most likely to break inside
+a container (headless Chromium, sandbox flags, GSAP staging), so the smoke test renders it for real
+instead of only checking that the engine reports healthy.
+"""
 
 import asyncio
 import json
@@ -9,6 +15,36 @@ from pathlib import Path
 from app.adapters.storage import LocalStorage
 from app.adapters.video import RemotionRenderer
 from app.ports.interfaces import StoryboardRenderSpec
+from app.services.scene_code import CODE_RUNTIME_VERSION
+
+SCENE_CODE = {
+    "runtime": CODE_RUNTIME_VERSION,
+    "html": (
+        '<div class="sun"></div><div class="horizon"></div>'
+        '<div class="titles"><p class="kicker">container check</p>'
+        '<h1 class="headline">Code scene</h1><p class="rule"></p></div>'
+    ),
+    "css": (
+        "body{background:linear-gradient(180deg,#0b1b2a 0%,#2a4a63 68%,#d9b07a 100%)}"
+        ".horizon{position:absolute;left:0;right:0;top:64%;height:2px;"
+        "background:rgba(255,255,255,.35)}"
+        ".sun{position:absolute;left:60%;top:44%;width:14vw;height:14vw;border-radius:50%;"
+        "background:radial-gradient(circle,#ffd98a 0%,#f2a65a 60%,transparent 72%)}"
+        ".titles{position:absolute;left:7vw;bottom:18vh}"
+        ".kicker{font:500 1vw/1.2 ui-monospace,monospace;letter-spacing:.28em;"
+        "text-transform:uppercase;color:var(--accent,#d6ff45)}"
+        ".headline{margin-top:1.4vh;font:italic 400 5.4vw/1.02 Georgia,serif;color:#f7f3ea}"
+        ".rule{margin-top:1.8vh;width:9vw;height:2px;background:var(--accent,#d6ff45);"
+        "transform-origin:left center}"
+    ),
+    "js": (
+        "const tl = gsap.timeline({paused: true});"
+        'tl.from(".sun", {y: 60, opacity: 0, duration: 1.2, ease: "power2.out"}, 0);'
+        'tl.from(".headline", {opacity: 0, y: 26, duration: 0.9, ease: "power3.out"}, 0.7);'
+        'tl.fromTo(".rule", {scaleX: 0}, {scaleX: 1, duration: 0.8, ease: "power2.inOut"}, 1.2);'
+        "window.__timelines.push(tl);"
+    ),
+}
 
 
 async def run() -> int:
@@ -18,6 +54,9 @@ async def run() -> int:
     print(f"engine: {'ok' if ok else 'FAILED'} - {detail}")
     if not ok:
         return 1
+
+    code_file = root / "code-03.json"
+    code_file.write_text(json.dumps(SCENE_CODE), encoding="utf-8")
 
     spec = StoryboardRenderSpec(
         render_id="docker",
@@ -37,9 +76,12 @@ async def run() -> int:
                  "transition": "fade", "caption": "Rendering works inside the container."},
                 {"id": "s2", "index": 2, "title": "Two", "durationS": 1.5,
                  "transition": "fade", "caption": "Captions, audio and encode included."},
+                {"id": "s3", "index": 3, "title": "Code", "mode": "code", "codeKey": "scene-3",
+                 "prompt": "a harbour at dusk", "durationS": 2.5,
+                 "transition": "fade", "caption": "A scene written as HTML, CSS and GSAP."},
             ],
         },
-        assets=[],
+        assets=[{"key": "scene-3", "source": str(code_file), "name": "code-03.json"}],
     )
     artifact, meta = await renderer.render(spec)
     print("composition:", json.dumps(meta.get("composition")))

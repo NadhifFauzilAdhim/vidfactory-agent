@@ -18,6 +18,7 @@ import path from "node:path";
 import process from "node:process";
 import {bundle} from "@remotion/bundler";
 import {makeCancelSignal, renderMedia, renderStill, selectComposition} from "@remotion/renderer";
+import {stageVendor} from "./assets.mjs";
 
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 2) {
@@ -73,6 +74,10 @@ async function main() {
     stageAsset(publicDir, renderId, asset.source, asset.name);
   }
 
+  // Code scenes read their scene programme from a staged file and their animation library from the
+  // shared vendor dir. Both must exist before the bundle is built.
+  stageVendor(publicDir, import.meta.dirname);
+
   const inputProps = JSON.parse(
     JSON.stringify(job.inputProps)
       .replace(/"assetKey":"([^"]+)"/g, (_m, key) => {
@@ -84,8 +89,23 @@ async function main() {
         const asset = assets.find((a) => a.key === key);
         if (!asset) throw new Error(`unknown narrationKey ${key}`);
         return `"narrationSrc":"${publicUrl(asset, renderId)}"`;
+      })
+      .replace(/"codeKey":"([^"]+)"/g, (_m, key) => {
+        const asset = assets.find((a) => a.key === key);
+        if (!asset) throw new Error(`unknown codeKey ${key}`);
+        return `"codeSrc":"${publicUrl(asset, renderId)}"`;
       }),
   );
+
+  // Inline scene programmes into the props: the composition must not depend on an async fetch (a
+  // missing file would silently render the generative fallback). Code scenes are small (tens of KB
+  // for a whole video), and load-bearing content belongs in the props it is rendered from.
+  for (const scene of inputProps?.spec?.scenes ?? []) {
+    if (!scene || !scene.codeSrc) continue;
+    const file = path.join(publicDir, scene.codeSrc);
+    scene.code = JSON.parse(fs.readFileSync(file, "utf8"));
+    delete scene.codeSrc;
+  }
 
   const cancelFile = job.cancelFile ? path.resolve(job.cancelFile) : null;
   const {cancelSignal, cancel} = makeCancelSignal();
@@ -159,7 +179,9 @@ async function main() {
       cancelSignal,
       overwrite: true,
       logLevel: "warn",
-      timeoutInMilliseconds: 60000,
+      // Code scenes mount a nested document per scene; give each frame more headroom than the
+      // default 60 s without letting a hung scene stall the whole job.
+      timeoutInMilliseconds: job.frameTimeoutMs ?? 120000,
       chromiumOptions: {gl: job.gl ?? "angle"},
       onStart: ({frameCount, resolvedConcurrency}) =>
         emit({type: "start", frameCount, concurrency: resolvedConcurrency}),

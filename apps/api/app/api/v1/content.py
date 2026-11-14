@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -151,6 +152,18 @@ async def project_detail(
                 )
             ).scalars()
         }
+        code = {
+            a.scene_id: a
+            for a in (
+                await session.execute(
+                    select(MediaAsset).where(
+                        MediaAsset.project_id == project.id,
+                        MediaAsset.kind == "code",
+                        MediaAsset.deleted_at.is_(None),
+                    )
+                )
+            ).scalars()
+        }
         for s in scene_rows:
             img = images.get(s.id)
             aud = audio.get(s.id)
@@ -172,6 +185,9 @@ async def project_detail(
                     transition=s.transition,
                     image_url=_url(img.storage_key) if img else None,
                     audio_url=_url(aud.storage_key) if aud else None,
+                    code_url=f"/api/v1/content/{project.id}/scenes/{s.index}/code"
+                    if s.id in code
+                    else None,
                     audio_duration_s=float(aud.duration_s) if aud else None,
                     audio_provider=aud.provider if aud else None,
                     audio_model=aud.model_id if aud else None,
@@ -406,6 +422,51 @@ async def regenerate_scene(
         )
     await session.commit()
     return await _project_out(session, project)
+
+
+@router.get("/{project_id}/scenes/{scene_index}/code")
+async def scene_code(
+    project_id: uuid.UUID,
+    scene_index: int,
+    principal: Principal = Depends(get_principal),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """The scene programme the LLM wrote (HTML/CSS/GSAP), so it can be reviewed before publishing.
+
+    Read-only: the operator sees exactly what the renderer runs. Editing goes through a regenerate.
+    """
+    project = await _get(session, principal, project_id)
+    board = project.storyboard
+    if board is None:
+        raise NotFoundError("No storyboard for this project")
+    scene = await session.scalar(
+        select(Scene).where(Scene.storyboard_id == board.id, Scene.index == scene_index)
+    )
+    if scene is None:
+        raise NotFoundError(f"Scene {scene_index} not found")
+    asset = await session.scalar(
+        select(MediaAsset).where(
+            MediaAsset.scene_id == scene.id,
+            MediaAsset.kind == "code",
+            MediaAsset.deleted_at.is_(None),
+        )
+    )
+    if asset is None:
+        raise NotFoundError(f"Scene {scene_index} has no code")
+    raw = await get_storage().get_bytes(asset.storage_key)
+    try:
+        code = json.loads(raw)
+    except ValueError as exc:
+        raise AppError("Stored scene code is not valid JSON") from exc
+    return {
+        "scene_index": scene_index,
+        "runtime": code.get("runtime"),
+        "html": code.get("html", ""),
+        "css": code.get("css", ""),
+        "js": code.get("js", ""),
+        "model": asset.model,
+        "provider": asset.provider,
+    }
 
 
 @router.delete("/{project_id}", status_code=204)

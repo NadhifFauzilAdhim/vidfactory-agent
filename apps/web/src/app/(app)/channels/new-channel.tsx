@@ -95,10 +95,20 @@ export function NewChannelForm() {
           <option value="1:1">1:1 square</option>
         </Select>
       </Field>
-      <Field label="visuals" hint={form.visual_mode === "generative" ? "no image provider needed" : "one image per scene"}>
+      <Field
+        label="visuals"
+        hint={
+          form.visual_mode === "generative"
+            ? "no image provider needed"
+            : form.visual_mode === "code"
+              ? "the LLM writes each scene as HTML/CSS/GSAP — no image provider needed"
+              : "one image per scene"
+        }
+      >
         <Select value={form.visual_mode} onChange={(e) => setForm({ ...form, visual_mode: e.target.value })}>
           <option value="image">Generated images</option>
           <option value="generative">Remotion only (no images)</option>
+          <option value="code">Written by AI (HTML/CSS/GSAP)</option>
         </Select>
       </Field>
       <Field label="visual style" className="md:col-span-2">

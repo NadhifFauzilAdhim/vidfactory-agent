@@ -112,7 +112,7 @@ class ChannelCreate(BaseModel):
     language: str = "en"
     video_format: Literal["16:9", "9:16", "1:1"] = "16:9"
     accent_color: str = "#D6FF45"
-    visual_mode: Literal["image", "generative"] = "image"
+    visual_mode: Literal["image", "generative", "code"] = "image"
     settings: ChannelSettingsIn | None = None
 
 
@@ -125,7 +125,7 @@ class ChannelUpdate(BaseModel):
     language: str | None = None
     video_format: Literal["16:9", "9:16", "1:1"] | None = None
     accent_color: str | None = None
-    visual_mode: Literal["image", "generative"] | None = None
+    visual_mode: Literal["image", "generative", "code"] | None = None
     is_active: bool | None = None
     settings: ChannelSettingsIn | None = None
 
@@ -308,6 +308,8 @@ class SceneOut(BaseModel):
     transition: str
     image_url: str | None = None
     audio_url: str | None = None
+    #: Scene programme written by the LLM (visual_mode="code"); served by /scenes/{index}/code.
+    code_url: str | None = None
     audio_duration_s: float | None = None
     audio_provider: str | None = None
     audio_model: str | None = None

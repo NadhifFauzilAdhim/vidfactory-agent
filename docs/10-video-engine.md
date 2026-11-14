@@ -43,6 +43,19 @@ A **template** supplies only the look — title card, outro card and how a scene
 | `shorts` | 9:16 | full-bleed, stacked title block, chunky subtitles |
 | `youtube-shorts` | 9:16 | the editorial identity in vertical |
 
+A scene is drawn one of three ways (`StoryboardScene.mode`):
+
+| mode | source | notes |
+| --- | --- | --- |
+| `asset` (default) | one generated image per scene | Ken Burns / video clip |
+| `generative` | procedural CSS from the prompt hash | no provider call |
+| `code` | HTML/CSS/GSAP written by the LLM | sandboxed iframe, see `docs/11-code-scenes.md` |
+
+Code scenes render inside `<CodeScene>` (`src/code-scene.tsx`): the document is mounted once with
+`srcDoc`, `sandbox="allow-scripts"`, and each frame is delivered by `postMessage` to the runtime,
+which seeks every paused GSAP timeline. `render.mjs` inlines the staged scene programme into the
+props and stages `vendor/gsap.min.js` via `assets.mjs`.
+
 Adding a template = one file in `src/templates/` + one entry in `src/catalogue.tsx` + one entry in
 `apps/api/app/services/storyboard.py::TEMPLATES`. The renderer, timeline, audio graph and player
 code are untouched.
@@ -182,6 +195,19 @@ npx remotion compositions src/index.tsx     # sanity check: six compositions
 cd apps/api
 alembic upgrade head
 python -m uvicorn app.main:app --port 8001  # RENDER_IN_API=true renders in-process
+```
+
+### Docker
+
+The API image bakes the engine in, including GSAP for code scenes. `assets.mjs` stages
+`vendor/gsap.min.js` into the render's public dir, and the image build runs
+`node scripts/code-scene-check.mjs` so a broken sandbox or a missing dependency fails the build.
+
+```bash
+docker compose --profile full build api
+docker compose --profile full up -d
+# smoke test: renders a code scene through the real adapter, then validates the MP4
+docker compose --profile full exec api python /app/infrastructure/docker/container_check.py
 ```
 
 `GET /api/v1/video/engine` reports Node version, Remotion version, whether `node_modules` is present

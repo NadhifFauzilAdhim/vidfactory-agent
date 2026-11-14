@@ -10,3 +10,5 @@
 - [08 — API reference](08-api-reference.md)
 - [09 - Credentials & text-to-speech](09-credentials-and-tts.md)
 - [10 - Video engine (Remotion)](10-video-engine.md)
+- [11 - Code scenes (LLM-authored HTML/CSS/GSAP)](11-code-scenes.md)
+- [12 - Testing code scenes](12-testing-code-scenes.md)

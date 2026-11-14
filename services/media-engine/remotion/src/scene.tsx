@@ -16,6 +16,8 @@ import type React from "react";
 import {AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame} from "remotion";
 
 import {BrandMark, Captions, ProgressBar} from "./captions";
+import {CODE_RUNTIME_VERSION} from "./code-runtime";
+import {CodeScene} from "./code-scene";
 import {GenerativeScene} from "./generative";
 import {MONO, kenBurns} from "./motion";
 import type {CaptionStyle, StoryboardScene, VideoSpec, VisualElement} from "./types";
@@ -38,6 +40,28 @@ export function Backdrop({
           src={staticFile(scene.videoSrc)}
           muted
           style={{width: "100%", height: "100%", objectFit: "cover"}}
+        />
+      </AbsoluteFill>
+    );
+  }
+  if (scene.mode === "code") {
+    // LLM-authored scene. Only a complete, current-runtime scene is used; anything else falls
+    // through to the generative backdrop so a bad render stays visible instead of going black.
+    if (scene.code?.runtime === CODE_RUNTIME_VERSION && scene.code.html.trim().length > 0) {
+      return (
+        <AbsoluteFill>
+          <CodeScene code={scene.code} accent={scene.accentColor ?? spec.accent} />
+        </AbsoluteFill>
+      );
+    }
+    return (
+      <AbsoluteFill>
+        <GenerativeScene
+          prompt={scene.prompt ?? scene.title ?? ""}
+          title={scene.title}
+          frames={frames}
+          accentOverride={scene.accentColor ?? undefined}
+          seed={`${scene.id}:${scene.prompt ?? ""}`}
         />
       </AbsoluteFill>
     );

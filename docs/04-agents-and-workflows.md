@@ -40,6 +40,7 @@ raises `StructuredOutputError`.
 | `storyboard` | Storyboard | storyboard | `StoryboardInput` → `StoryboardDraft` |
 | `voice_generation` | Voice Generation | voice | `VoiceRequest` → `VoiceResult` (TTS port + storage) |
 | `visual_generation` | Visual Generation | visual | `VisualRequest` → `VisualResult` (image port + storage) |
+| `code_scene` | Code Scene | visual | `CodeSceneRequestBatch` → `CodeSceneBatchResult` (LLM writes HTML/CSS/GSAP per scene; see `docs/11-code-scenes.md`) |
 | `video_production` | Video Production | rendering | `RenderRequest` → `RenderResult` (renderer port) |
 | `quality_control` | Quality Control | qc | `QcInput` → `QualityReport` (rules + LLM) |
 | `seo_metadata` | SEO & Metadata | seo | `SeoInput` → `MetadataDraft` (+ thumbnail) |
@@ -67,7 +68,8 @@ Scheduler ─▶ ProductionWorkflow(project_id)
    script        script_writer           ── schema validation, word budget
    storyboard    storyboard
    voice         voice_generation        ── per-scene audio → R2
-   visual        visual_generation       ── per-scene image → R2
+   visual        visual_generation       ── per-scene image → R2  (visual_mode=image)
+                 code_scene              ── per-scene HTML/CSS/GSAP → R2  (visual_mode=code)
    render        video_production        ── FFmpeg/Remotion → mp4
    qc            quality_control         ── score; may loop back to visual/voice (max N)
    seo           seo_metadata            ── metadata + thumbnail concept

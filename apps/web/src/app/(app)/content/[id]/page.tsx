@@ -12,6 +12,7 @@ import { StatusChip, TagBox } from "@/components/ui/status";
 import { DataTable, TD, TH, THead, TR } from "@/components/ui/table";
 
 import { ApprovalDecision, MetadataEditor, SceneRegenerate } from "./actions";
+import { SceneCodeViewer } from "./scene-code";
 
 export const metadata = { title: "Project" };
 
@@ -188,6 +189,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
                         <audio controls preload="none" src={assetUrl(s.audio_url)} className="h-6 max-w-[220px]" />
                       )}
                     </div>
+                    {s.code_url && <SceneCodeViewer codeUrl={s.code_url} />}
                   </div>
                 </li>
               ))}
